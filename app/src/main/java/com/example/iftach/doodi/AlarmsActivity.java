@@ -4,12 +4,9 @@ import android.app.ProgressDialog;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
-import android.os.AsyncTask;
 import android.os.Bundle;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
-import android.support.design.widget.FloatingActionButton;
-import android.support.design.widget.Snackbar;
 import android.support.v7.app.AppCompatActivity;
 import android.support.v7.widget.Toolbar;
 import android.util.Log;
@@ -22,37 +19,57 @@ import android.widget.ArrayAdapter;
 import android.widget.ListView;
 import android.widget.TextView;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
 import io.particle.android.sdk.cloud.ParticleCloudException;
 import io.particle.android.sdk.cloud.ParticleDevice;
 import io.particle.android.sdk.cloud.ParticleEvent;
-import io.particle.android.sdk.cloud.ParticleEventHandler;
 
 public class AlarmsActivity extends AppCompatActivity {
 
     private static final String TAG = "ALARMS";
-    private MyApplication myApplication;
-    private ProgressDialog progress;
+    private Progress progress;
     private long subscriptionId = -1;
+    private ParticleDevice device;
+    private String name;
 
-    private ParticleEventHandler particleEventHandler = new ParticleEventHandler() {
+    private GetAlarms.Listener getAlarmsListener = new GetAlarms.Listener() {
         @Override
-        public void onEventError(Exception e) {
-            Log.e(TAG, e.getMessage());
+        public void onEvent(ParticleEvent particleEvent) {
+            new GetAlarms(device, getAlarmsListener, subscriptionId).execute();
         }
 
         @Override
-        public void onEvent(String eventName, ParticleEvent particleEvent) {
-            Log.d(TAG, "onEvent:" + eventName);
-            runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    new GetAlarms().execute();
+        public void onStart() {
+            progress.showProgress("Loading alarms..");
+        }
+
+        @Override
+        public void onSuccess(String alarmsStr, long aSubscriptionId) {
+            progress.dismissProgress();
+            Log.d(TAG, alarmsStr);
+            subscriptionId = aSubscriptionId;
+
+            String alarmsSplits[] = alarmsStr.split("\n");
+            ArrayList<Alarm> alarmArrayList = new ArrayList<>(alarmsSplits.length);
+
+            for (String alarmsSplit : alarmsSplits) {
+                Alarm alarm = new Alarm(alarmsSplit);
+                if (alarm.getDuration() > 0) {
+                    alarmArrayList.add(alarm);
                 }
-            });
+            }
+
+            AlarmAdapter alarmAdapter = new AlarmAdapter(AlarmsActivity.this, alarmArrayList);
+            ListView listView = findViewById(R.id.alarms_list_view);
+            listView.setAdapter(alarmAdapter);
+        }
+
+        @Override
+        public void onFailure(Exception e) {
+            progress.dismissProgress();
+            // TODO: handle error
         }
     };
 
@@ -60,11 +77,12 @@ public class AlarmsActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_alarms);
-        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
+        Toolbar toolbar = findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
 
-        myApplication = (MyApplication) getApplication();
-        progress = new ProgressDialog(this);
+        progress = new Progress(this);
+        device = getIntent().getParcelableExtra(Constants.DEVICE_EXTRA);
+        name = getIntent().getStringExtra(Constants.NAME_EXTRA);
     }
 
 
@@ -83,6 +101,8 @@ public class AlarmsActivity extends AppCompatActivity {
 
         if (id == R.id.action_new_alarm) {
             Intent intent = new Intent(AlarmsActivity.this, NewAlarmActivity.class);
+            intent.putExtra(Constants.NAME_EXTRA, name);
+            intent.putExtra(Constants.DEVICE_EXTRA, device);
             startActivity(intent);
             return true;
         }
@@ -95,11 +115,11 @@ public class AlarmsActivity extends AppCompatActivity {
     protected void onStart() {
         super.onStart();
 
-        if (myApplication.getDevice() == null) {
+        if (device == null) {
             finish();
         }
         else {
-            new GetAlarms().execute();
+            new GetAlarms(device, getAlarmsListener, subscriptionId).execute();
         }
     }
 
@@ -110,22 +130,17 @@ public class AlarmsActivity extends AppCompatActivity {
         if (subscriptionId != -1) {
             try {
                 Log.d(TAG, "unsubscribe from alarm-event");
-                myApplication.getDevice().unsubscribeFromEvents(subscriptionId);
+                device.unsubscribeFromEvents(subscriptionId);
+                subscriptionId = -1;
             } catch (ParticleCloudException e) {
                 e.printStackTrace();
             }
         }
     }
 
-    private void setProgress(String message) {
-        progress.setMessage(message);
-        progress.setCancelable(false);
-        progress.show();
-    }
-
     private class AlarmAdapter extends ArrayAdapter<Alarm> {
 
-        public AlarmAdapter(@NonNull Context context, @NonNull List<Alarm> alarms) {
+        AlarmAdapter(@NonNull Context context, @NonNull List<Alarm> alarms) {
             super(context, R.layout.alarm_item, alarms);
         }
 
@@ -138,145 +153,106 @@ public class AlarmsActivity extends AppCompatActivity {
                 convertView = LayoutInflater.from(getContext()).inflate(R.layout.alarm_item, parent, false);
             }
 
-            TextView timeText = (TextView) convertView.findViewById(R.id.alarm_time);
-            TextView nameText = (TextView) convertView.findViewById(R.id.alarm_name);
-            TextView durText = (TextView) convertView.findViewById(R.id.alarm_duration);
+            TextView nameText = convertView.findViewById(R.id.alarm_name);
+            TextView timeText = convertView.findViewById(R.id.alarm_time);
+            TextView durText = convertView.findViewById(R.id.alarm_duration);
 
-            String timeStr = String.valueOf(alarm.getHour()) + ":";
-            if (alarm.getMinute() < 10) {
-                timeStr += "0";
+            if (alarm != null) {
+                nameText.setText(alarm.getName());
+                final String timeStr = alarm.getTimeString();
+                timeText.setText(timeStr);
+                durText.setText(String.valueOf(alarm.getDuration()));
+
+                convertView.setOnLongClickListener(new View.OnLongClickListener() {
+                    @Override
+                    public boolean onLongClick(View view) {
+                        Log.d(TAG, "clicked on alarm number: " + position);
+
+                        new DialogMessage(AlarmsActivity.this, "Delete Alarm",
+                                "Are you sure you want to delete alarm: " + alarm.getName()
+                                        + " on " + timeStr + "?", true, "Delete",
+                                new DialogInterface.OnClickListener() {
+                                    @Override
+                                    public void onClick(DialogInterface dialogInterface, int i) {
+                                        dialogInterface.dismiss();
+                                        new DeleteAlarm(device, position, new DeleteAlarm.Listener() {
+                                            @Override
+                                            public void onStart() {
+                                                progress.showProgress("Deleting alarm..");
+                                            }
+
+                                            @Override
+                                            public void onSuccess(int res) {
+                                                progress.dismissProgress();
+                                                new GetAlarms(device, getAlarmsListener, subscriptionId);
+                                            }
+
+                                            @Override
+                                            public void onFailure(Exception e) {
+                                                progress.dismissProgress();
+                                            }
+                                        }).execute();
+                                    }
+                                }, "Cancel", new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialogInterface, int i) {
+
+                                dialogInterface.dismiss();
+                            }
+                        }).show();
+                        return false;
+                    }
+
+                });
             }
-            timeStr += String.valueOf(alarm.getMinute());
-
-            timeText.setText(timeStr);
-            nameText.setText(alarm.name);
-            durText.setText(String.valueOf(alarm.getDuration()));
-
-            final String finalTimeStr = timeStr;
-            convertView.setOnLongClickListener(new View.OnLongClickListener() {
-                @Override
-                public boolean onLongClick(View view) {
-                    Log.d(TAG, "clicked on alarm number: " + position);
-
-                    new DialogMessage(AlarmsActivity.this, "Delete Alarm",
-                            "Are you sure you want to delete alarm: " + alarm.getName()
-                                    + " on " + finalTimeStr + "?", true, "Delete",
-                            new DialogInterface.OnClickListener() {
-                                @Override
-                                public void onClick(DialogInterface dialogInterface, int i) {
-                                    dialogInterface.dismiss();
-                                    new DeleteAlarm(position).execute();
-                                }
-                            }, "Cancel", new DialogInterface.OnClickListener() {
-                        @Override
-                        public void onClick(DialogInterface dialogInterface, int i) {
-                            dialogInterface.dismiss();
-                        }
-                    }).show();
-                    return false;
-                }
-
-            });
             return convertView;
         }
     }
 
-    private class GetAlarms extends AsyncTask<Void, Void, Boolean> {
-        private String alarmsStr;
-
-        @Override
-        protected void onPreExecute() {
-            super.onPreExecute();
-            setProgress("Loading alarms..");
-        }
-
-        @Override
-        protected Boolean doInBackground(Void... voids) {
-            try {
-                alarmsStr = myApplication.getDevice().getStringVariable("alarms_str");
-                if (subscriptionId == -1) {
-                    Log.d(TAG, "subscribe to alarm-event");
-                    subscriptionId = myApplication.getDevice().subscribeToEvents("alarm-event", particleEventHandler);
-                }
-                return true;
-            } catch (ParticleCloudException | IOException | ParticleDevice.VariableDoesNotExistException e) {
-                e.printStackTrace();
-                return false;
-            }
-        }
-
-        @Override
-        protected void onPostExecute(Boolean aBoolean) {
-            super.onPostExecute(aBoolean);
-            progress.dismiss();
-
-            if (aBoolean) {
-                Log.d(TAG, alarmsStr);
-
-                String alarmsSplits[] = alarmsStr.split("\n");
-                ArrayList<Alarm> alarmArrayList = new ArrayList<>(alarmsSplits.length);
-
-                for (int i=0; i < alarmsSplits.length; i++) {
-                    Alarm alarm = new Alarm(alarmsSplits[i]);
-                    if (alarm.getDuration() > 0) {
-                        alarmArrayList.add(alarm);
-                    }
-                }
-
-                AlarmAdapter alarmAdapter = new AlarmAdapter(AlarmsActivity.this, alarmArrayList);
-                ListView listView = (ListView) findViewById(R.id.alarms_list_view);
-                listView.setAdapter(alarmAdapter);
-            }
-            else {
-                // TODO: handle error
-            }
-        }
-    }
-
-    private class DeleteAlarm extends AsyncTask<Void, Void, Boolean> {
-
-        private int res;
-        private int alarmNum;
-
-        public DeleteAlarm(int alarmNum) {
-            this.alarmNum = alarmNum;
-        }
-
-        @Override
-        protected void onPreExecute() {
-            super.onPreExecute();
-            setProgress("Deleting alarm..");
-        }
-
-        @Override
-        protected Boolean doInBackground(Void... voids) {
-            if (myApplication.getDevice() != null) {
-                if (myApplication.getDevice().isConnected()) {
-                    ArrayList<String> arrayList = new ArrayList<>(1);
-                    arrayList.add(String.valueOf(alarmNum));
-                    try {
-                        res = myApplication.getDevice().callFunction("deleteAlarm", arrayList);
-                        return true;
-                    } catch (ParticleCloudException | IOException | ParticleDevice.FunctionDoesNotExistException e) {
-                        e.printStackTrace();
-                    }
-                }
-
-            }
-            return false;
-        }
-
-        @Override
-        protected void onPostExecute(Boolean aBoolean) {
-            super.onPostExecute(aBoolean);
-            progress.dismiss();
-
-            if (aBoolean) {
-                new GetAlarms().execute();
-            }
-            else {
-                finish();
-            }
-        }
-    }
+//    private class DeleteAlarm extends AsyncTask<Void, Void, Boolean> {
+//
+//        private int res;
+//        private int alarmNum;
+//
+//        public DeleteAlarm(int alarmNum) {
+//            this.alarmNum = alarmNum;
+//        }
+//
+//        @Override
+//        protected void onPreExecute() {
+//            super.onPreExecute();
+//            setProgress("Deleting alarm..");
+//        }
+//
+//        @Override
+//        protected Boolean doInBackground(Void... voids) {
+//            if (device != null) {
+//                if (device.isConnected()) {
+//                    ArrayList<String> arrayList = new ArrayList<>(1);
+//                    arrayList.add(String.valueOf(alarmNum));
+//                    try {
+//                        res = device.callFunction("deleteAlarm", arrayList);
+//                        return true;
+//                    } catch (ParticleCloudException | IOException | ParticleDevice.FunctionDoesNotExistException e) {
+//                        e.printStackTrace();
+//                    }
+//                }
+//
+//            }
+//            return false;
+//        }
+//
+//        @Override
+//        protected void onPostExecute(Boolean aBoolean) {
+//            super.onPostExecute(aBoolean);
+//            progress.dismiss();
+//
+//            if (aBoolean) {
+//                new GetAlarms().execute();
+//            }
+//            else {
+//                finish();
+//            }
+//        }
+//    }
 }
